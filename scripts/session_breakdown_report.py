@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Scope: reports how much plan quota and API-priced cost one Claude Code session used, and
 # records /usage samples.
-# Called by the `ccsb` command (bin/ccsb: report, --estimate) and by plan_quota_sampler.sh
-# (--sample-if-due). Reads ~/.claude/projects transcripts, pricing.json next to this script,
-# and <data dir>/pricing.override.json; writes only the data dir.
+# Called by the `ccsb` command (bin/ccsb: report, --estimate, --sampling, --delete-samples)
+# and by plan_quota_sampler.sh (--sample-if-due). Reads ~/.claude/projects transcripts,
+# pricing.json next to this script, and <data dir>/pricing.override.json; writes only the
+# data dir.
 """Plan-quota and API-cost report for one Claude Code session, plus /usage sampling for calibration.
 
 Usage:
@@ -18,6 +19,12 @@ Usage:
                                 Week·All has no calibrated coefficient, the line gives weighted
                                 units and USD at API prices and ends with a not-calibrated mark.
   ccsb --mark-price-checked     record today as the last price check
+  ccsb --sampling on|off|status turn /usage sampling on or off (config.json in the data dir),
+                                or print the switch, the sample count and time range, and
+                                which bars are calibrated. While sampling is off, reports and
+                                estimates show no quota percentage. Default: on.
+  ccsb --delete-samples [--yes] list the sample and calibration files (dry run); with --yes,
+                                delete them. The switch, scan state, and price files stay.
   ccsb ... --json               print the computed numbers as JSON (debug)
 
 A report may carry a third line `PRICE_CHECK: due (<reason>)`: a model is missing from
@@ -31,7 +38,8 @@ Weighted units of an API call = sum of tokens x price multiplier x the model's b
 price ratio (Sonnet 5 = 1). "Tokens" in the report are input-equivalent tokens: the same
 sum without the model ratio. Quota coefficients (weighted units per 1% of a bar) come from
 samples of `/usage`; see compute_coefficients(). A bar without a calibrated coefficient
-shows a not-calibrated label. API cost in USD = weighted units x the Sonnet 5 base input
+shows a not-calibrated label. While sampling is off (see sampling_enabled()), no quota
+figure shows at all. API cost in USD = weighted units x the Sonnet 5 base input
 price / 1e6.
 """
 import argparse
@@ -69,6 +77,11 @@ COEF_FILE = "coefficients.json"
 ATTEMPT_FILE = "last_attempt.json"
 PRICE_CHECK_FILE = "price-check.json"  # {"checked": "YYYY-MM-DD"}; kept out of pricing.json
 PRICE_OVERRIDE_FILE = "pricing.override.json"  # same schema as pricing.json; see price_table()
+CONFIG_FILE = "config.json"   # {"sampling": false} turns sampling off; see sampling_enabled()
+SAMPLER_LOCK = "sampler.lock"  # held by one sample_if_due run for its whole life
+STAMP_FILE = "last-sample.stamp"  # mtime = start of the last /usage sample
+# Files that --delete-samples removes: the samples and everything calibrated from them.
+SAMPLE_DATA_FILES = (SAMPLES_FILE, COEF_FILE, ATTEMPT_FILE, STAMP_FILE)
 PRICE_CHECK_MAX_DAYS = 30
 
 # ---------------------------------------------------------------------------------------
@@ -105,6 +118,7 @@ USAGE_TIMEOUT_S = 45
 SAME_WINDOW_S = 3600          # reset times this close belong to one window
 SEEN_DAYS = 8                 # state keeps message ids this long
 SAMPLE_KEEP_DAYS = 14         # samples of the last 2 weekly windows
+COEF_CACHE_LOCK_S = 5         # wait for the data lock before a coefficients.json write
 
 COLD_GAP_S = 3600
 COMPACT_CONTEXT = 20_000      # context assumed after /compact, for --estimate
@@ -155,19 +169,21 @@ LABELS = {
         "colon": ": ", "sep": ", ", "paren": (" (", ")"),
         "quota_failed": "Quota read failed",
         "api_cost": "API cost",
-        "work_head": "| Work type | Tokens | Week·All | Share | Main |",
+        "work_head": ("Work type", "Tokens", "Week·All", "Share", "Main"),
         "top_title": "**Top tasks** (first-level agent, incl. its subagents)",
-        "top_head": "| # | Model | Week·All | Share | Task |",
+        "top_head": ("#", "Model", "Week·All", "Share", "Task"),
         "cold_title": "**Cold-start waste** (back after >1h idle, {n} {times})",
-        "cold_head": "| Model | Week·All | Share |",
+        "cold_head": ("Model", "Week·All", "Share"),
         "shot_title": "**⚠️ High screenshot cost** ({n} images, share {share})",
-        "shot_head": "| Source | Model | Images | Week·All | Share |",
+        "shot_head": ("Source", "Model", "Images", "Week·All", "Share"),
         "context": "Context: {used} / {window} ({pct})",
         "context_nowin": "Context: {used}",
-        "footer": ("Share = this row's weekly quota ÷ this session's weekly quota "
-                   "(weighted by model price, not token count). Calibrated from {n} {samples}."),
+        "footer_share": ("Share = this row's weekly quota ÷ this session's weekly quota "
+                         "(weighted by model price, not token count)."),
+        "footer_samples": " Calibrated from {n} {samples}.",
         "footer_uncalibrated": " A not-calibrated bar needs more /usage samples.",
         "footer_cost": " API cost = this session's tokens at API list prices.",
+        "footer_sampling_off": "Sampling is off, so quota % is hidden. Turn it on with /ccsb:sampling on.",
         "work": {"think": "Think/reply", "web": "Web search", "read": "Read code",
                  "edit": "Edit code", "run": "Run command", "spawn": "Spawn agent",
                  "ui": "UI control", "other": "Other tools"},
@@ -180,6 +196,7 @@ LABELS = {
                     "after /compact to about {small}: {after}",
         "estimate_units": "≈ {units} weighted units, {usd}",
         "estimate_uncalibrated": " (not calibrated)",
+        "estimate_sampling_off": " (sampling off)",
         "uncalibrated": "not calibrated",
         "override_invalid": "⚠️ pricing.override.json is invalid and was ignored: {why}",
     },
@@ -189,19 +206,21 @@ LABELS = {
         "colon": "：", "sep": "，", "paren": ("（", "）"),
         "quota_failed": "额度读取失败",
         "api_cost": "API 计价",
-        "work_head": "| 工作类型 | token | 周·全部 | 占比 | 主session |",
+        "work_head": ("工作类型", "token", "周·全部", "占比", "主session"),
         "top_title": "**最费周额度的任务**（第一层子 agent，含它的子 agent）",
-        "top_head": "| # | 模型 | 周·全部 | 占比 | 任务 |",
+        "top_head": ("#", "模型", "周·全部", "占比", "任务"),
         "cold_title": "**冷启动浪费**（离开 >1h 后回来，共 {n} 次）",
-        "cold_head": "| 模型 | 周·全部 | 占比 |",
+        "cold_head": ("模型", "周·全部", "占比"),
         "shot_title": "**⚠️ 截图开销较大**（共 {n} 张，占比 {share}）",
-        "shot_head": "| 来源 | 模型 | 张数 | 周·全部 | 占比 |",
+        "shot_head": ("来源", "模型", "张数", "周·全部", "占比"),
         "context": "上下文: {used} / {window}（{pct}）",
         "context_nowin": "上下文: {used}",
-        "footer": ("占比 = 该行占用的周额度 ÷ 本 session 占用的周额度"
-                   "（按模型价格加权，不按 token 数）。系数来自 {n} 个采样样本。"),
+        "footer_share": ("占比 = 该行占用的周额度 ÷ 本 session 占用的周额度"
+                         "（按模型价格加权，不按 token 数）。"),
+        "footer_samples": "系数来自 {n} 个采样样本。",
         "footer_uncalibrated": "标为未校准的额度条需要更多 /usage 样本。",
         "footer_cost": "API 计价 = 本会话 token 按 API 标价计算的费用。",
+        "footer_sampling_off": "采样已关闭，不显示额度 %。用 /ccsb:sampling on 打开。",
         "work": {"think": "思考/回复", "web": "搜索网页", "read": "读代码",
                  "edit": "改代码", "run": "跑命令", "spawn": "派 agent",
                  "ui": "界面操作", "other": "其他工具"},
@@ -214,6 +233,7 @@ LABELS = {
                     "compact 到约 {small} 后：{after}",
         "estimate_units": "≈ {units} 加权单位，{usd}",
         "estimate_uncalibrated": "（未校准）",
+        "estimate_sampling_off": "（采样已关闭）",
         "uncalibrated": "未校准",
         "override_invalid": "⚠️ pricing.override.json 无效，已忽略：{why}",
     },
@@ -1194,7 +1214,21 @@ def cell_pct(units, coef):
     return fmt_pct(units / coef) if coef is not None else "-"
 
 
-def render(a, lang, coefs):
+def md_table(head, align, rows, drop=None):
+    """Markdown table lines: the head, the alignment row, then one line per row of cells.
+    drop is the index of a column to leave out, or None."""
+    keep = [i for i in range(len(head)) if i != drop]
+
+    def line(cells):
+        return "| " + " | ".join(str(cells[i]) for i in keep) + " |"
+    return [line(head), "|" + "|".join(align[i] for i in keep) + "|"] + [line(r) for r in rows]
+
+
+def render(a, lang, coefs, sampling=True):
+    """Report lines and TASK CONTEXT lines. While sampling is off, no quota figure shows:
+    no bar bullets, no quota-read-failed line, no Week·All or Week·Fable in the model
+    titles, no Week·All table column, and one sampling-off line in place of the
+    calibration sentence of the footer."""
     L = LABELS[lang]
     c_all, c_fable, c_5h = coefs["week_all"], coefs["week_fable"], coefs["5h"]
     total = a["total"] or 1e-9
@@ -1203,10 +1237,15 @@ def render(a, lang, coefs):
     # have a Week·Fable bar (or no samples exist yet); see effective_coefficients().
     show_fable = "Fable" in a["fam_units"] and coefs["fable_bar"]
     shown = ("5h", "week_all") + (("week_fable",) if show_fable else ())
+
+    def table(head, align, rows, quota_col):
+        """quota_col: index of the Week·All column, left out while sampling is off."""
+        return md_table(head, align, rows, None if sampling else quota_col)
+
     out = [L["title"], ""]
-    if coefs.get("quota_failed"):
+    if sampling and coefs.get("quota_failed"):
         out.append(L["quota_failed"])
-    else:
+    elif sampling:
         # Every bar: the whole session's units ÷ the bar's units per 1% (Week·Fable: Fable
         # units only). A session that spans several 5h windows can pass 100% on 5h.
         out += [f"- 5h{L['colon']}{bar_text(a['total'], c_5h, L, True)}",
@@ -1217,19 +1256,21 @@ def render(a, lang, coefs):
 
     for fam in family_order(a["fam_units"], a["fam_units"]):
         fu = a["fam_units"][fam]
-        parts = [f"{L['week_all']} {bar_text(fu, c_all, L)}"]
-        if fam == "Fable" and show_fable:
-            parts.append(f"{L['week_fable']} {bar_text(fu, c_fable, L)}")
+        parts = []
+        if sampling:
+            parts.append(f"{L['week_all']} {bar_text(fu, c_all, L)}")
+            if fam == "Fable" and show_fable:
+                parts.append(f"{L['week_fable']} {bar_text(fu, c_fable, L)}")
         parts.append(f"{L['share']} {fmt_pct(fu / total * 100)}")
         name = family_title(fam, a["fam_models"].get(fam, ()))
         title = f"**{name}**{L['paren'][0]}{L['sep'].join(parts)}{L['paren'][1]}"
-        out += [title, "", L["work_head"], "|---|--:|--:|--:|:-:|"]
         rows = [(k, v) for k, v in a["rows"].items() if k[0] == fam and v[0] > 0]
         rows.sort(key=lambda kv: -kv[1][0])
-        for (f, wt, is_main), (units, ie) in rows:
-            out.append(f"| {cell(L['work'][wt])} | {fmt_tokens(ie)} | {cell_pct(units, c_all)} | "
-                       f"{fmt_pct(units / total * 100)} | {'✓' if is_main else '-'} |")
-        out.append("")
+        cells = [(cell(L["work"][wt]), fmt_tokens(ie), cell_pct(units, c_all),
+                  fmt_pct(units / total * 100), "✓" if is_main else "-")
+                 for (_f, wt, is_main), (units, ie) in rows]
+        out += [title, ""]
+        out += table(L["work_head"], ("---", "--:", "--:", "--:", ":-:"), cells, 2) + [""]
 
     ranked = sorted(a["tasks"].items(), key=lambda kv: -kv[1]["units"])
     ranked = [kv for kv in ranked if kv[1]["units"] > 0]
@@ -1237,33 +1278,32 @@ def render(a, lang, coefs):
     if ranked:
         n = 3 if any(t["units"] / total * 100 > TOP_SHARE_THRESHOLD for _k, t in ranked) else 10
         top = ranked[:n]
-        out += [L["top_title"], "", L["top_head"], "|--:|---|--:|--:|---|"]
+        cells = []
         for i, (_k, t) in enumerate(top, 1):
             models = "+".join(f for f in family_order(t["fams"], t["fams"]) if t["fams"][f] > 0) or "-"
-            out.append(f"| {i} | {cell(models)} | {cell_pct(t['units'], c_all)} | "
-                       f"{fmt_pct(t['units'] / total * 100)} | {{{{TASK_{i}}}}} |")
-        out.append("")
+            cells.append((i, cell(models), cell_pct(t["units"], c_all),
+                          fmt_pct(t["units"] / total * 100), f"{{{{TASK_{i}}}}}"))
+        out += [L["top_title"], ""]
+        out += table(L["top_head"], ("--:", "---", "--:", "--:", "---"), cells, 2) + [""]
 
     cold = a["cold"]
     cold_rows = [(f, u) for f, u in cold["fam"].items() if u > 0]
     if cold_rows:
         times = "time" if cold["events"] == 1 else "times"
-        out += [L["cold_title"].format(n=cold["events"], times=times), "", L["cold_head"],
-                "|---|--:|--:|"]
-        for f, u in sorted(cold_rows, key=lambda x: -x[1]):
-            out.append(f"| {f} | {cell_pct(u, c_all)} | {fmt_pct(u / total * 100)} |")
-        out.append("")
+        cells = [(f, cell_pct(u, c_all), fmt_pct(u / total * 100))
+                 for f, u in sorted(cold_rows, key=lambda x: -x[1])]
+        out += [L["cold_title"].format(n=cold["events"], times=times), ""]
+        out += table(L["cold_head"], ("---", "--:", "--:"), cells, 1) + [""]
 
     shot_units = sum(s["units"] for s in a["shots"].values())
     shot_n = sum(s["n"] for s in a["shots"].values())
     if shot_units / total * 100 >= SCREENSHOT_MIN_SHARE:
-        out += [L["shot_title"].format(n=shot_n, share=fmt_pct(shot_units / total * 100)), "",
-                L["shot_head"], "|---|---|--:|--:|--:|"]
-        for (src, fam), s in sorted(a["shots"].items(), key=lambda kv: -kv[1]["units"]):
-            if s["n"] or s["units"] > 0:
-                out.append(f"| {cell(L['source'][src])} | {fam} | {s['n']} | "
-                           f"{cell_pct(s['units'], c_all)} | {fmt_pct(s['units'] / total * 100)} |")
-        out.append("")
+        cells = [(cell(L["source"][src]), fam, s["n"], cell_pct(s["units"], c_all),
+                  fmt_pct(s["units"] / total * 100))
+                 for (src, fam), s in sorted(a["shots"].items(), key=lambda kv: -kv[1]["units"])
+                 if s["n"] or s["units"] > 0]
+        out += [L["shot_title"].format(n=shot_n, share=fmt_pct(shot_units / total * 100)), ""]
+        out += table(L["shot_head"], ("---", "---", "--:", "--:", "--:"), cells, 3) + [""]
 
     ctx = a["context"]
     if ctx:
@@ -1274,11 +1314,14 @@ def render(a, lang, coefs):
             out.append(L["context_nowin"].format(used=fmt_tokens(ctx["used"])))
         out.append("")
 
-    footer = L["footer"].format(n=coefs["samples"], samples="sample" if coefs["samples"] == 1 else "samples")
-    if any(coefs[bar] is None for bar in shown):
-        footer += L["footer_uncalibrated"]
-    footer += L["footer_cost"]
-    out.append(footer)
+    if sampling:
+        footer = L["footer_share"] + L["footer_samples"].format(
+            n=coefs["samples"], samples="sample" if coefs["samples"] == 1 else "samples")
+        if any(coefs[bar] is None for bar in shown):
+            footer += L["footer_uncalibrated"]
+        out.append(footer + L["footer_cost"])
+    else:
+        out += [L["footer_share"] + L["footer_cost"], "", L["footer_sampling_off"]]
     if a.get("bad"):
         out += ["", L["malformed"].format(n=a["bad"])]
     if price_table()["override_error"]:
@@ -1313,10 +1356,21 @@ def task_prompt(a, t):
 # ---------------------------------------------------------------------------------------
 # /usage samples and calibration
 
+_HELD_LOCKS = set()  # names of the data_lock locks this process holds now
+
+
 @contextlib.contextmanager
-def data_lock(timeout=60):
+def data_lock(timeout=60, name=".lock"):
+    """Exclusive flock on <data dir>/<name>, waiting up to timeout seconds, else
+    TimeoutError. ".lock" guards the data files; SAMPLER_LOCK is held by a running
+    sample_if_due. Re-entrant per name: a nested call for a lock this process already holds
+    takes no second flock, because a flock on a new fd would wait on this process's own
+    lock."""
+    if name in _HELD_LOCKS:
+        yield
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
-    fd = os.open(data_path(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(data_path(name), os.O_CREAT | os.O_RDWR, 0o600)
     deadline = time.time() + timeout
     try:
         while True:
@@ -1325,9 +1379,13 @@ def data_lock(timeout=60):
                 break
             except BlockingIOError:
                 if time.time() > deadline:
-                    raise TimeoutError("data dir lock busy")
+                    raise TimeoutError(f"data dir lock {name} busy")
                 time.sleep(0.2)
-        yield
+        _HELD_LOCKS.add(name)
+        try:
+            yield
+        finally:
+            _HELD_LOCKS.discard(name)
     finally:
         os.close(fd)
 
@@ -1606,24 +1664,44 @@ def compute_coefficients(samples, previous):
     return coefs
 
 
+def file_fingerprint(path):
+    """(inode, size, mtime in ns) of a file, or None when it is missing."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
 def calibrated_coefficients():
     """Coefficients from the raw samples, weighted with the current merged prices. Cached
     in coefficients.json under a key of the merged-price hash and the samples file mtime; a
-    saved value is reused only when it was computed with the same merged prices."""
+    saved value is reused only when it was computed with the same merged prices.
+
+    The computation runs without a lock. The cache write takes the data lock, the lock that
+    --delete-samples holds while it deletes, and happens only while samples.jsonl and
+    coefficients.json are still as they were read. So a delete between the read and the
+    write is never undone by an old calibration. When the lock stays busy for
+    COEF_CACHE_LOCK_S, or a file changed, the values are returned without a cache write."""
     price_hash = price_table()["hash"]
+    samples_path, coef_path = data_path(SAMPLES_FILE), data_path(COEF_FILE)
+    seen = (file_fingerprint(samples_path), file_fingerprint(coef_path))
     try:
-        mtime = os.path.getmtime(data_path(SAMPLES_FILE))
+        mtime = os.path.getmtime(samples_path)
     except OSError:
         mtime = 0
     key = f"{price_hash}:{mtime}"
-    cache = read_json(data_path(COEF_FILE), {}) or {}
+    cache = read_json(coef_path, {}) or {}
     if cache.get("key") == key and isinstance(cache.get("coefs"), dict):
         return cache["coefs"]
     previous = cache.get("coefs") if cache.get("pricing") == price_hash else {}
     coefs = compute_coefficients(load_samples(), previous)
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        write_json(data_path(COEF_FILE), {"key": key, "pricing": price_hash, "coefs": coefs})
+        with data_lock(COEF_CACHE_LOCK_S):
+            if (file_fingerprint(samples_path), file_fingerprint(coef_path)) == seen:
+                write_json(coef_path, {"key": key, "pricing": price_hash, "coefs": coefs})
+    except TimeoutError:
+        pass
     except OSError as e:
         log_error(f"cannot write {COEF_FILE}: {e}")
     return coefs
@@ -1682,8 +1760,105 @@ def record_sample_text(text):
         write_json(data_path(ATTEMPT_FILE), {"t": now, "ok": True})
 
 
+def read_config():
+    cfg = read_json(data_path(CONFIG_FILE), {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def sampling_enabled():
+    """The sampling switch. Off only when config.json holds "sampling": false; a missing
+    file, a missing key, or an unreadable file means on. plan_quota_sampler.sh reads the
+    same key with a regex before it starts a sample."""
+    return read_config().get("sampling") is not False
+
+
+def set_sampling(on):
+    """Write the switch to config.json atomically and keep the file's other keys.
+    write_json writes compact JSON ("sampling":false), which the regex in
+    plan_quota_sampler.sh matches."""
+    with data_lock():
+        cfg = read_config()
+        cfg["sampling"] = bool(on)
+        write_json(data_path(CONFIG_FILE), cfg)
+
+
+def sampling_line():
+    return f"Sampling: {'on' if sampling_enabled() else 'off'}"
+
+
+def sampling_status():
+    """--sampling status: the switch, the sample count and time range (local time), and
+    which bars have a calibrated coefficient, as the report would use them."""
+    times = sorted(s["t"] for s in load_samples() if is_number(s.get("t")))
+    coefs = effective_coefficients()
+
+    def when(t):
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    lines = [sampling_line()]
+    if times:
+        lines.append(f"Samples: {len(times)}, from {when(times[0])} to {when(times[-1])} (local time)")
+    else:
+        lines.append("Samples: 0")
+    names = {"5h": "5h", "week_all": "Week·All", "week_fable": "Week·Fable"}
+    lines.append("Calibrated: " + ", ".join(
+        f"{names[bar]} {'yes' if coefs[bar] is not None else 'no'}" for bar in BARS))
+    return lines
+
+
+def fmt_bytes(n):
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / 1024 / 1024:.1f} MB"
+
+
+def sample_data_files():
+    """(name, size) of each SAMPLE_DATA_FILES file that exists."""
+    out = []
+    for name in SAMPLE_DATA_FILES:
+        try:
+            out.append((name, os.path.getsize(data_path(name))))
+        except OSError:
+            pass
+    return out
+
+
+def delete_samples(yes):
+    """--delete-samples. Without yes: a dry run that lists the files and deletes nothing.
+    With yes: waits for a running sample to end (SAMPLER_LOCK) and holds the data lock, so
+    no sample writes during the delete, then deletes the files. The switch in config.json,
+    the scan state, the price files, and error.log stay. Returns the exit code."""
+    files = sample_data_files() if os.path.isdir(DATA_DIR) else []
+    if not files:
+        print(f"Nothing to delete in {DATA_DIR}")
+        if yes:
+            print(sampling_line())
+        return 0
+    if not yes:
+        print(f"Would delete in {DATA_DIR}:")
+        print("\n".join(f"- {name} ({fmt_bytes(size)})" for name, size in files))
+        print("Dry run, nothing deleted. Add --yes to delete these files.")
+        return 0
+    try:
+        with data_lock(USAGE_TIMEOUT_S + 45, SAMPLER_LOCK), data_lock():
+            files = sample_data_files()
+            for name, _size in files:
+                os.remove(data_path(name))
+    except TimeoutError:
+        print("ERROR: a /usage sample is still running. Nothing deleted. Try again in a minute.")
+        return 1
+    print(f"Deleted in {DATA_DIR}:")
+    print("\n".join(f"- {name} ({fmt_bytes(size)})" for name, size in files) or "- nothing")
+    print(sampling_line())
+    return 0
+
+
 def trigger_sample():
-    """Start a forced sample in the background (a current-session report takes one)."""
+    """Start a forced sample in the background (a current-session report takes one).
+    Nothing starts while sampling is off."""
+    if not sampling_enabled():
+        return
     try:
         subprocess.Popen([sys.executable, os.path.realpath(__file__), "--sample-if-due", "--force"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1707,17 +1882,20 @@ def find_claude():
 
 
 def sample_if_due(force):
-    """One /usage sample, run detached by the Stop hook. An exclusive flock on
-    sampler.lock, held for this process's whole life (the kernel frees it if the process
-    dies), makes parallel hooks start at most one /usage run. Without force, a sample
-    newer than 5 minutes (last-sample.stamp) means nothing to do."""
+    """One /usage sample, run detached by the Stop hook. While sampling is off, nothing
+    happens, with or without force. An exclusive flock on sampler.lock, held for this
+    process's whole life (the kernel frees it if the process dies), makes parallel hooks
+    start at most one /usage run. Without force, a sample newer than 5 minutes
+    (last-sample.stamp) means nothing to do."""
+    if not sampling_enabled():
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
-    fd = os.open(data_path("sampler.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(data_path(SAMPLER_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
-    stamp = data_path("last-sample.stamp")
+    stamp = data_path(STAMP_FILE)
     try:
         if not force and time.time() - os.path.getmtime(stamp) < SAMPLE_GAP_S:
             return
@@ -1750,12 +1928,13 @@ def sample_if_due(force):
 
 def report(main_paths, as_json):
     coefs = effective_coefficients()
+    sampling = sampling_enabled()
     a = analyze(main_paths)
     lang = session_lang(a["main"])
     if as_json:
-        print(json.dumps(debug_view(a, lang, coefs, main_paths), ensure_ascii=False, indent=1))
+        print(json.dumps(debug_view(a, lang, coefs, sampling, main_paths), ensure_ascii=False, indent=1))
         return
-    lines, ctx = render(a, lang, coefs)
+    lines, ctx = render(a, lang, coefs, sampling)
     print("REPORT")
     print(f"lang: {lang}")
     due = price_check_due({c["model"] for c in a["calls"]})
@@ -1767,9 +1946,10 @@ def report(main_paths, as_json):
         print("\n".join(ctx))
 
 
-def debug_view(a, lang, coefs, main_paths):
+def debug_view(a, lang, coefs, sampling, main_paths):
     return {
-        "session": main_paths, "lang": lang, "coefficients": coefs, "pricing": price_table()["source"],
+        "session": main_paths, "lang": lang, "sampling": sampling, "coefficients": coefs,
+        "pricing": price_table()["source"],
         "total_units": a["total"], "api_cost_usd": a["cost_usd"], "calls": len(a["calls"]), "agents": len(a["agents"]),
         "fam_units": a["fam_units"],
         "rows": [{"fam": k[0], "work": k[1], "main": k[2], "units": v[0], "ie_tokens": v[1]}
@@ -1799,7 +1979,8 @@ def estimate(main_paths, context, turns):
     cold-start calls (first call after >1h idle). Week·Fable joins the line for a Fable
     session under the same rule as the report. While Week·All is not calibrated, the line
     gives weighted units and USD at API prices in place of Week·All and ends with the
-    estimate_uncalibrated label."""
+    estimate_uncalibrated label. While sampling is off, the line gives weighted units and
+    USD, no quota figure, and ends with the estimate_sampling_off label."""
     if isinstance(main_paths, str):
         main_paths = [main_paths]
     registry, s = {}, None
@@ -1823,8 +2004,10 @@ def estimate(main_paths, context, turns):
     per_turn = len(calls) / humans if humans and calls else DEFAULT_CALLS_PER_TURN
     n_calls = turns * per_turn
     coefs = effective_coefficients()
-    c_all, c_fable = coefs["week_all"], coefs["week_fable"]
-    show_fable = family(model) == "Fable" and coefs["fable_bar"]
+    sampling = sampling_enabled()
+    # While sampling is off, the line takes the not-calibrated form without Week·Fable.
+    c_all, c_fable = (coefs["week_all"], coefs["week_fable"]) if sampling else (None, None)
+    show_fable = sampling and family(model) == "Fable" and coefs["fable_bar"]
     fast = speed_factor(model, calls[-1]["usage"]) if calls else 1.0
 
     def cost(ctx):
@@ -1842,9 +2025,11 @@ def estimate(main_paths, context, turns):
         return L["sep"].join(parts)
 
     name = f"{family(model)} {model_version(model)}".strip()
+    tag = (L["estimate_sampling_off"] if not sampling
+           else L["estimate_uncalibrated"] if c_all is None else "")
     return L["estimate"].format(turns=turns, calls=int(round(n_calls)), ctx=fmt_tokens(context),
                                 model=name, now=cost(context), small=fmt_tokens(COMPACT_CONTEXT),
-                                after=cost(COMPACT_CONTEXT)) + (L["estimate_uncalibrated"] if c_all is None else "")
+                                after=cost(COMPACT_CONTEXT)) + tag
 
 
 def main():
@@ -1854,6 +2039,9 @@ def main():
     g.add_argument("--session")
     g.add_argument("--record-sample", metavar="FILE")
     g.add_argument("--sample-if-due", action="store_true")
+    g.add_argument("--sampling", choices=("on", "off", "status"))
+    g.add_argument("--delete-samples", action="store_true")
+    ap.add_argument("--yes", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--mark-price-checked", action="store_true")
@@ -1861,12 +2049,29 @@ def main():
     ap.add_argument("--context", type=parse_count)
     ap.add_argument("--turns", type=int, default=10)
     args = ap.parse_args()
-    for flag, used in (("--mark-price-checked", args.mark_price_checked),
-                       ("--sample-if-due", args.sample_if_due),
-                       ("--record-sample", args.record_sample)):
-        if args.estimate and used:
-            ap.error(f"--estimate and {flag} cannot be used together")
+    # The group g keeps --title, --session, --record-sample, --sample-if-due, --sampling, and
+    # --delete-samples apart. --estimate (which takes --session) and --mark-price-checked
+    # sit outside it, so their clashes are checked here.
+    used = {"--estimate": args.estimate, "--mark-price-checked": args.mark_price_checked,
+            "--sample-if-due": args.sample_if_due, "--record-sample": args.record_sample is not None,
+            "--sampling": args.sampling is not None, "--delete-samples": args.delete_samples}
+    clashes = [("--estimate", flag) for flag in used if flag != "--estimate"]
+    clashes += [("--mark-price-checked", "--sampling"), ("--mark-price-checked", "--delete-samples")]
+    for first, second in clashes:
+        if used[first] and used[second]:
+            ap.error(f"{first} and {second} cannot be used together")
+    if args.yes and not args.delete_samples:
+        ap.error("--yes works only with --delete-samples")
 
+    if args.sampling == "status":
+        print("\n".join(sampling_status()))
+        return 0
+    if args.sampling:
+        set_sampling(args.sampling == "on")
+        print(sampling_line())
+        return 0
+    if args.delete_samples:
+        return delete_samples(args.yes)
     if args.record_sample:
         record_sample(args.record_sample)
         return 0

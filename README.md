@@ -91,6 +91,12 @@ does not have it, so ask Claude to run it.
 - **A quota sample, at most once per 5 minutes from the hook.** The job runs `claude -p "/usage"` and
   stores the bar percentages. This command makes no model call and uses 0 tokens.
   A report of the current session also takes one sample.
+- **A switch for the sampling.** Sampling is on by default. To turn it off, say
+  "turn off ccsb sampling" or run `/ccsb:sampling off`. `/ccsb:sampling on` turns it back
+  on, and `/ccsb:sampling status` shows the switch, the number of samples, and the
+  calibrated bars. While sampling is off, the hook starts no job, and a report takes no
+  sample. The report then shows the token counts and the API cost, with no quota %.
+  The switch lives in `config.json` in the data folder.
 - **Local reads.** The report reads the session transcripts under `~/.claude/projects/`.
 
 All data stays on your machine. The plugin's own code makes no network request. The
@@ -120,11 +126,23 @@ the data folder, so a plugin update keeps them.
 | Item | Value |
 |---|---|
 | Folder | `~/.claude/cc-session-breakdown/` |
-| Content | Quota samples, calibration, price override, an error log, and reading state with the paths of your transcript files. No conversation text |
+| Content | Quota samples, calibration, the sampling switch (`config.json`), price override, an error log, and reading state with the paths of your transcript files. No conversation text |
 | Move it | Set the environment variable `CCSB_DATA_DIR` |
 | After uninstall | The folder stays, so a reinstall keeps the calibration |
 
-Delete the data:
+Delete the samples and the calibration only: run `/ccsb:sampling delete`. Claude lists the
+files first, and deletes them after you confirm. The delete keeps the switch, the reading
+state, and the price files. While sampling is on, new samples start the calibration again.
+
+The `/ccsb:sampling` skill runs these commands. You can also ask Claude to run them:
+
+| Command | Effect |
+|---|---|
+| `ccsb --sampling on`, `off`, or `status` | Turns sampling on or off, or shows its status |
+| `ccsb --delete-samples` | Lists the sample and calibration files. Deletes nothing |
+| `ccsb --delete-samples --yes` | Deletes those files |
+
+Delete all data:
 
 ```bash
 rm -rf ~/.claude/cc-session-breakdown

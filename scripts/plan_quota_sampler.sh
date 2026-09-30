@@ -1,14 +1,24 @@
 #!/bin/bash
 # Scope: Stop hook that asks session_breakdown_report.py for a plan-quota sample (`/usage`).
 # Called by the plugin's Stop hook (hooks/hooks.json). `--force` skips the 5-minute throttle.
-# Reads and writes nothing itself; the Python side locks, throttles, samples, and records.
+# Reads only the sampling switch in <data dir>/config.json and writes nothing; the Python
+# side locks, throttles, samples, and records.
 #
 # The hook returns at once: it starts `session_breakdown_report.py --sample-if-due` detached.
 # That process takes an exclusive flock (the kernel frees it if the process dies), checks
 # the 5-minute stamp (`--force` skips it), runs `claude -p "/usage"`, and records the result.
 # CCSB_SAMPLING=1 marks the inner `claude -p` run, so its own Stop hook exits here.
+# "sampling": false in config.json (written by `ccsb --sampling off`) also exits here, before
+# Python starts. The data dir rule matches the Python side: $CCSB_DATA_DIR when set and
+# non-empty, else ~/.claude/cc-session-breakdown. The regex tolerates any JSON spacing.
 
 [ "${CCSB_SAMPLING:-}" = "1" ] && exit 0
+
+config="${CCSB_DATA_DIR:-$HOME/.claude/cc-session-breakdown}/config.json"
+off_re='"sampling"[[:space:]]*:[[:space:]]*false'
+if [ -r "$config" ] && [[ "$(<"$config")" =~ $off_re ]]; then
+  exit 0
+fi
 
 # Resolve this script's real directory (the plugin folder may be a symlink).
 self="${BASH_SOURCE[0]}"

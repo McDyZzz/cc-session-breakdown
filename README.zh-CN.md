@@ -86,6 +86,10 @@ Claude Code 把 `ccsb` 命令加到 Claude 的 Bash 工具的 PATH 里。你自�
 - **一个 Stop hook。** Claude 每轮回复结束后，hook 启动一个后台任务，然后立刻返回。
 - **配额采样，hook 最多每 5 分钟一次。** 后台任务运行 `claude -p "/usage"`，保存配额条的百分比。
   这个命令不调用模型，消耗 0 token。查看当前 session 的报告时，也会采样一次。
+- **采样开关。** 采样默认打开。要关掉，就说"关掉 ccsb 采样"，或运行 `/ccsb:sampling off`。
+  `/ccsb:sampling on` 重新打开，`/ccsb:sampling status` 显示开关、采样数量和已校准的配额条。
+  采样关闭时，hook 不启动后台任务，查看报告时也不采样。报告照常显示 token 数量和 API 成本，
+  但不显示额度 %。开关保存在数据文件夹的 `config.json` 里。
 - **本地读取。** 报告读取 `~/.claude/projects/` 下的 session 记录。
 
 所有数据都留在你的机器上。plugin 自己的代码不发起网络请求。`claude` 程序会联系 Anthropic
@@ -111,11 +115,22 @@ plugin 自带一份价格表 `scripts/pricing.json`。遇到价格表里没有�
 | 项目 | 值 |
 |---|---|
 | 文件夹 | `~/.claude/cc-session-breakdown/` |
-| 内容 | 配额采样、校准结果、价格覆盖文件、错误日志，以及读取状态（含你的 session 记录文件的路径）。没有对话内容 |
+| 内容 | 配额采样、校准结果、采样开关（`config.json`）、价格覆盖文件、错误日志，以及读取状态（含你的 session 记录文件的路径）。没有对话内容 |
 | 改位置 | 设置环境变量 `CCSB_DATA_DIR` |
 | 卸载后 | 文件夹保留，重装后校准结果还在 |
 
-删除数据：
+只删除采样和校准结果：运行 `/ccsb:sampling delete`。Claude 先列出要删的文件，你确认后才删除。
+删除时保留采样开关、读取状态和价格文件。采样打开时，新的采样会重新开始校准。
+
+`/ccsb:sampling` skill 运行下面这些命令。你也可以让 Claude 直接运行：
+
+| 命令 | 作用 |
+|---|---|
+| `ccsb --sampling on`、`off` 或 `status` | 打开或关闭采样，或显示采样状态 |
+| `ccsb --delete-samples` | 列出采样和校准文件，不删除 |
+| `ccsb --delete-samples --yes` | 删除这些文件 |
+
+删除全部数据：
 
 ```bash
 rm -rf ~/.claude/cc-session-breakdown

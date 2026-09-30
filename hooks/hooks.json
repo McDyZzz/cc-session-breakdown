@@ -1,5 +1,5 @@
 {
-  "description": "Samples the plan quota bars (/usage) in the background after each turn, so the ccsb report can calibrate its estimates.",
+  "description": "Samples the plan quota bars (/usage) in the background after each turn, so the ccsb report can calibrate its estimates. /ccsb:sampling off turns it off.",
   "hooks": {
     "Stop": [
       {

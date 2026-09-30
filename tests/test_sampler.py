@@ -3,13 +3,12 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import time
 
 import pytest
 
-from conftest import SAMPLER, USAGE_TEXT, make_exec
+from conftest import USAGE_TEXT, make_exec, run_sampler, wait_for
 
 
 def attempt(env):
@@ -59,21 +58,6 @@ def test_record_sample_from_file(env, tmp_path):
     res = env.run("--record-sample", str(saved))
     assert res.returncode == 0, res.stderr
     assert len(env.samples()) == 1
-
-
-def run_sampler(env, **extra):
-    # bash comes from the test's PATH, so a test may give the hook a restricted PATH.
-    return subprocess.run([shutil.which("bash"), SAMPLER], env=env.env(**extra), capture_output=True,
-                          text=True, timeout=10)
-
-
-def wait_for(path, seconds):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if path.exists():
-            return True
-        time.sleep(0.1)
-    return False
 
 
 def test_sampler_hook_exits_at_once_inside_a_sample(env):

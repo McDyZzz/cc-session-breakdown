@@ -8,9 +8,11 @@ Tests never touch the real ~/.claude folder or the real `claude` program:
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -152,6 +154,23 @@ class Env:
 @pytest.fixture
 def env(tmp_path):
     return Env(tmp_path)
+
+
+def run_sampler(env, **extra):
+    """Run the Stop hook script. bash comes from the test's PATH, so a test may give the
+    hook a restricted PATH."""
+    return subprocess.run([shutil.which("bash"), SAMPLER], env=env.env(**extra), capture_output=True,
+                          text=True, timeout=10)
+
+
+def wait_for(path, seconds):
+    """True as soon as path exists, False after seconds without it."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def sample(t, sonnet_input, bars, fable_input=0, state_id="state-a"):

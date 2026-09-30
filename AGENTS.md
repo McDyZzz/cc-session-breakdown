@@ -1,7 +1,8 @@
 # AGENTS.md - rules for working on this repo
 
 This file is for agents and people who change the code in this repo.
-People who only use the plugin read `README.md`. Their agents read `skills/report/SKILL.md`.
+People who only use the plugin read `README.md`. Their agents read the `SKILL.md` files
+under `skills/`.
 
 ## What this repo is
 
@@ -15,8 +16,9 @@ The repo is both the plugin and its marketplace.
 | --- | --- |
 | `.claude-plugin/` | `plugin.json` (name, version) and `marketplace.json` |
 | `skills/report/SKILL.md` | How AI runs the report. Usage only |
+| `skills/sampling/SKILL.md` | How AI turns sampling on or off, shows its status, and deletes samples. Usage only |
 | `scripts/session_breakdown_report.py` | The whole program. Python standard library only |
-| `scripts/plan_quota_sampler.sh` | Stop hook. Starts a quota sample in the background |
+| `scripts/plan_quota_sampler.sh` | Stop hook. Starts a quota sample in the background, unless sampling is off |
 | `scripts/pricing.json` | Bundled API prices |
 | `hooks/hooks.json` | Registers the Stop hook |
 | `bin/ccsb` | Launcher. Claude Code puts `bin/` on the PATH of the Bash tool |
@@ -83,8 +85,10 @@ python3 -m pytest
 
 ## Data folder
 
-The script stores samples and state in `~/.claude/cc-session-breakdown/`.
-`CCSB_DATA_DIR` moves it. The folder stays when the plugin is removed.
+The script stores samples, state, and the sampling switch (`config.json`) in
+`~/.claude/cc-session-breakdown/`. `CCSB_DATA_DIR` moves it. The folder stays when the
+plugin is removed. The Python script and `plan_quota_sampler.sh` both resolve this folder
+and read the switch, so a change to either rule changes both files.
 
 ## Bundled prices
 

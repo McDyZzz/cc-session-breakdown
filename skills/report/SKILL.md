@@ -20,7 +20,8 @@ Scope:
 - macOS and Linux.
 
 The plugin's Stop hook samples the plan bars in the background. The quota estimates
-improve as samples add up.
+improve as samples add up. HUMAN turns the sampling on or off with `/ccsb:sampling`.
+While sampling is off, the report shows no quota percentage.
 
 ## Steps
 
@@ -200,6 +201,16 @@ the cold-start block:
 - Tables: Markdown, at most 5 columns, numbers right-aligned. Percentages: 2 decimals.
 - `Quota read failed` replaces the bar bullets when `/usage` cannot be parsed. The
   report then uses the last saved coefficients. The `API cost` bullet still shows.
+- Sampling off: `config.json` in the data folder holds `"sampling": false`
+  (`/ccsb:sampling off` writes it). The report then shows no quota percentage, even when
+  old samples and coefficients are on disk:
+  - The header shows only the `API cost` bullet: no bar bullets, no `Quota read failed`.
+  - A model group title keeps only `Share`, for example `**Opus** (Share 60.00%)`.
+  - Every table leaves out its Week·All column.
+  - No `not calibrated` text anywhere. The footer drops the calibration sentence. One
+    line follows it: `Sampling is off, so quota % is hidden. Turn it on with /ccsb:sampling on.`
+    (zh: `采样已关闭，不显示额度 %。用 /ccsb:sampling on 打开。`).
+  - Sampling on again: the percentages come back from the samples on disk.
 - Language: `zh` when at least 20% of HUMAN's own characters are CJK, or at least half of
   HUMAN's messages contain CJK. The script skips compact summaries, pasted code, and pasted
   logs.
@@ -216,6 +227,8 @@ other rules or scripts. Its output contract:
   only when Week·Fable itself is calibrated.
 - Week·All calibrated: Week·Fable joins the line for a Fable session under the same rule
   as the report.
+- Sampling off: the line gives weighted units and USD at API prices, with no quota figure.
+  It ends with ` (sampling off)` (zh: `（采样已关闭）`) in place of ` (not calibrated)`.
 - No estimate (`ERROR` or `MULTIPLE`): exit 1.
 - Wrong arguments, such as `--estimate` with no `--context`: usage error, exit 2.
 
@@ -246,9 +259,18 @@ other rules or scripts. Its output contract:
   most one sampler, and the lock frees itself if the process dies. It samples at most
   once per 5 minutes with `claude -p "/usage" --no-session-persistence` (0 tokens,
   45 s timeout). A report run for the current session also triggers one sample.
+- Sampling switch: `config.json` in the data folder. A missing file or key means on.
+  `ccsb --sampling on|off` writes it, `ccsb --sampling status` prints the switch, the
+  sample count and time range, and the calibrated bars. While it is off, the hook exits
+  before it starts Python, `--sample-if-due` does nothing (also with `--force`), and a
+  report run takes no sample.
 - Data folder: `~/.claude/cc-session-breakdown/`, or `CCSB_DATA_DIR` when set. The script
   reads transcripts incrementally and keeps the samples of the last 14 days. It deletes
   older samples each time it records a new one. The coefficient file stays.
+  `ccsb --delete-samples` lists the sample and calibration files (`samples.jsonl`,
+  `coefficients.json`, `last_attempt.json`, `last-sample.stamp`) and deletes nothing.
+  `ccsb --delete-samples --yes` waits for a running sample to end, then deletes them.
+  `config.json`, the scan state, the price files, and `error.log` stay.
 - Resumed sessions: the script follows the resume chain, reads every earlier session id's
   subagent folder, and dedupes calls by message id.
 - Screenshot cost: tokens per image ≈ width × height ÷ 750, read from the image header.
