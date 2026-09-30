@@ -1,0 +1,23 @@
+{
+  "_scope": "Per-model API prices for session_breakdown_report.py: the script uses them for weighted units and for the API cost in USD. Keys are exact model ids; a trailing -YYYYMMDD date or [1m] suffix is ignored when matching. input = base input $/MTok; the other fields are multipliers of that base price. fast_multiplier (optional, default 1) scales a call with usage.speed == \"fast\". web_search_usd_per_request prices usage.server_tool_use.web_search_requests.",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "read": "2026-09-26",
+  "web_search_usd_per_request": 0.01,
+  "models": {
+    "claude-fable-5-1": {"input": 10.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.025, "output": 5.0},
+    "claude-fable-5": {"input": 10.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-mythos-5-1": {"input": 10.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.025, "output": 5.0},
+    "claude-mythos-5": {"input": 10.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-opus-5-5": {"input": 4.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.05, "output": 5.0, "fast_multiplier": 2.0},
+    "claude-opus-5": {"input": 5.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0, "fast_multiplier": 2.0},
+    "claude-opus-4-8": {"input": 5.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0, "fast_multiplier": 2.0},
+    "claude-opus-4-7": {"input": 5.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-opus-4-6": {"input": 5.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-opus-4-5": {"input": 5.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-sonnet-5-5": {"input": 2.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-sonnet-5": {"input": 2.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-sonnet-4-6": {"input": 3.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-sonnet-4-5": {"input": 3.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0},
+    "claude-haiku-4-5": {"input": 1.0, "write_5m": 1.25, "write_1h": 2.0, "cache_read": 0.1, "output": 5.0}
+  }
+}

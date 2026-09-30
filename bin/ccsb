@@ -1,0 +1,12 @@
+#!/bin/bash
+# Scope: the `ccsb` command. Runs scripts/session_breakdown_report.py with all arguments.
+# Claude Code puts the plugin's bin/ folder on the Bash tool's PATH; HUMAN may also link
+# this file into a PATH folder. The loop resolves symlinks to find the real plugin folder.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  case "$self" in /*) ;; *) self="$dir/$self" ;; esac
+done
+root="$(cd -P "$(dirname "$self")/.." && pwd)"
+exec python3 "$root/scripts/session_breakdown_report.py" "$@"

@@ -1,0 +1,12 @@
+{
+  "name": "ccsb",
+  "version": "0.1.0",
+  "description": "Claude Code session breakdown: plan quota share, API-priced cost, and the split by model, agent, and kind of work for one session.",
+  "author": {
+    "name": "McDyZzz"
+  },
+  "homepage": "https://github.com/McDyZzz/cc-session-breakdown",
+  "repository": "https://github.com/McDyZzz/cc-session-breakdown",
+  "license": "MIT",
+  "keywords": ["claude-code", "usage", "quota", "tokens", "cost", "session", "breakdown"]
+}

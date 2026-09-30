@@ -1,0 +1,33 @@
+# Runs the pytest suite and a syntax check of the shell scripts on every push and pull request.
+# Python 3.9 is the oldest version the script supports; 3.14 is the newest stable one.
+# On macos-latest (arm64), actions/setup-python resolves 3.9 to 3.9.13, the newest 3.9 build for arm64.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run tests
+        run: python -m pytest
+      - name: Check shell script syntax
+        run: |
+          bash -n bin/ccsb
+          bash -n scripts/plan_quota_sampler.sh

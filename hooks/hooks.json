@@ -1,0 +1,16 @@
+{
+  "description": "Samples the plan quota bars (/usage) in the background after each turn, so the ccsb report can calibrate its estimates.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/plan_quota_sampler.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
